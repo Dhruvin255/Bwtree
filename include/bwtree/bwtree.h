@@ -1,13 +1,10 @@
 #pragma once
+// bwtree.h - public API.
 //
-// bwtree.h — public API.
-//
-// Concurrency model: a bounded set of threads, each of which calls
-// register_thread() ONCE and reuses the returned Context for every operation.
-// The Context carries the thread's epoch slot (for liveness) and its private
-// garbage list (for reclamation). insert / lookup / remove are latch-free for
-// concurrent execution; see the per-method notes and src/bwtree.cpp.
-//
+// Each thread calls register_thread() once and keeps the returned Context for
+// its lifetime. The Context carries the thread's epoch slot and private garbage
+// list. insert, lookup, and remove are all latch-free for concurrent execution.
+
 #include <vector>
 #include "bwtree/types.h"
 #include "bwtree/node.h"
@@ -26,52 +23,51 @@ class BwTree {
   BwTree(const BwTree&) = delete;
   BwTree& operator=(const BwTree&) = delete;
 
-  // Each worker thread calls this once and keeps the Context for its lifetime.
   Context register_thread() { return epoch_.register_thread(); }
 
-  // Insert or overwrite key->value. Latch-free: prepends a delta via CAS with a
-  // retry loop, then performs best-effort structural maintenance (consolidate /
-  // split). Safe under concurrent insert + lookup.
+  // Insert or overwrite key->value. Prepends a delta via CAS with a retry
+  // loop, then does best-effort consolidation and splitting.
   void insert(const Context& ctx, Key key, Value value);
 
-  // Point lookup. Latch-free and read-only (writes nothing to shared nodes).
-  // Returns true and sets *out_value if present.
+  // Point lookup. Read-only; never writes to any shared node.
   bool lookup(const Context& ctx, Key key, Value* out_value);
 
-  // Delete key (tombstone delta). The delta path is latch-free like insert; node
-  // MERGES on underflow are deliberately NOT implemented latch-free — see the big
-  // comment in src/bwtree.cpp. Underflowing pages simply stay (possibly empty)
-  // until a future consolidation drops the tombstones.
+  // Delete key via tombstone delta. Latch-free on the write path.
+  // Node merges on underflow are not implemented; see bwtree.cpp.
   bool remove(const Context& ctx, Key key);
 
-  // --- diagnostics / single-threaded helpers --------------------------------
-  // Force-collapse a page's delta chain. Exposed for tests; normally triggered
-  // automatically by insert/remove maintenance.
+  // Force-collapse a page's delta chain. Exposed for tests.
   void debug_consolidate(const Context& ctx, PID pid);
-  // Reclaim everything retired so far. Call only when no other thread is active
-  // (e.g. between phases of a single-threaded test, or after all joins).
+
+  // Reclaim all retired nodes. Only safe when no other thread is active.
   void quiesce_and_reclaim() { epoch_.reclaim_all(); }
-  // Count live keys by walking the structure (single-threaded use only).
+
+  // Count live keys by walking the whole structure. Single-threaded only.
   size_t debug_count_keys();
 
+  // Returns the current root PID (changes when the root splits).
+  PID debug_root_pid() const { return root_pid_.load(std::memory_order_seq_cst); }
+
+  // Returns the chain_len of the current head of page `pid`.
+  // 0 means the page just consolidated down to a clean base.
+  uint32_t debug_chain_len(PID pid) const {
+    Node* h = table_.load(pid);
+    return h ? h->chain_len : 0;
+  }
+
  private:
-  // ---- traversal -----------------------------------------------------------
-  // Descend from the root to the leaf page responsible for `key`, following side
-  // links across in-progress splits and cooperatively posting missing index terms
-  // to parents. If `path` is non-null it is filled root-first with the PIDs
-  // visited (used by maintenance to know each node's parent).
+  // Descend from root to the leaf responsible for `key`. Follows side links
+  // across in-progress splits and cooperatively posts any missing index terms
+  // to parents. If `path` is non-null it is filled root-first with visited PIDs.
   PID descend_to_leaf(const Context& ctx, Key key, std::vector<PID>* path);
 
-  // Within page `head`, decide whether `key` has moved right (this page split and
-  // `key >= split_key`). Returns the sibling PID to follow, or kInvalidPID if the
-  // key still belongs here.
+  // Returns the sibling PID to follow if `key` has moved past this page's
+  // high fence, or kInvalidPID if the key still belongs here.
   PID split_redirect(Node* head, Key key) const;
 
-  // Route `key` to a child PID within an inner page (index-entry deltas override
-  // the base, newest first; then the base separators).
+  // Route `key` to a child PID within an inner page.
   PID route_inner(Node* head, Key key) const;
 
-  // ---- structural maintenance (best effort) --------------------------------
   void maintain_node(const Context& ctx, PID pid, PID parent);
   Node* consolidate_leaf(const Context& ctx, PID pid);
   Node* consolidate_inner(const Context& ctx, PID pid);
@@ -82,7 +78,6 @@ class BwTree {
   void  grow_root(const Context& ctx, PID old_root,
                   Key split_key, bool has_high, Key high_key, PID sibling);
 
-  // Retire every node in the chain [head .. base] (used after consolidation).
   void retire_chain(const Context& ctx, Node* head);
 
   MappingTable          table_;
