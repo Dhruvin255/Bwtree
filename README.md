@@ -60,11 +60,3 @@ Full numbers in `RESULTS.md`, figures in `figures/`.
 
 Correctness: ran a concurrent oracle test (random concurrent ops, check final state against ground truth) and ThreadSanitizer comes back clean, 0 data races.
 
-## Not done yet
-
-- Tier 2 Postgres integration (shared memory, actual cross-backend concurrency)
-- latch-free merges on delete
-- MVCC-aware range scans
-- head to head against something like ART or Masstree, not just the toy baselines here
-
-Built this as a class project, so scope is intentionally cut where it is.
